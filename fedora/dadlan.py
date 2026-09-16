@@ -189,8 +189,38 @@ class DadLANApp(tk.Tk):
         threading.Thread(target=worker,daemon=True).start()
 
     def _finish_refresh(self,endpoints,started):
-        self._set_busy(False); self.endpoints=endpoints
-        for endpoint in endpoints:self._meta_for(endpoint)
+        self._set_busy(False)
+        
+        # Inject Fedora and JParrisDesktop manually as first-class nodes
+        import socket
+        try: f_ip = socket.gethostbyname(socket.gethostname())
+        except Exception: f_ip = "127.0.0.1"
+        fedora_ep = {"id": "fedora-control-plane", "name": "Fedora (AVANCE-WS7)", "status": "Connected", "OS": "Fedora Linux", "address": f_ip, "last_seen": time.strftime("%Y-%m-%d %H:%M:%S"), "agent_version": "Local"}
+        
+        try:
+            j_ip = socket.gethostbyname("JParrisDesktop")
+            j_status = "Connected"
+        except Exception:
+            j_ip = "UNKNOWN"
+            j_status = "Offline"
+        jp_ep = {"id": "jparris-desktop", "name": "JParrisDesktop", "status": j_status, "OS": "Windows", "address": j_ip, "last_seen": "Unknown", "agent_version": "N/A"}
+        
+        endpoints.extend([fedora_ep, jp_ep])
+        self.endpoints = endpoints
+        
+        for endpoint in self.endpoints:
+            meta = self._meta_for(endpoint)
+            if str(endpoint.get("id")) == "fedora-control-plane":
+                meta.laptopNumber = "CP"
+                meta.role = "Control Plane"
+                meta.protected = True
+                if not meta.friendlyName or meta.friendlyName == "Fedora (AVANCE-WS7)": meta.friendlyName = "Fedora Control Plane"
+            elif str(endpoint.get("id")) == "jparris-desktop":
+                meta.laptopNumber = "DT"
+                meta.role = "Desktop"
+                meta.protected = True
+                if not meta.friendlyName or meta.friendlyName == "JParrisDesktop": meta.friendlyName = "JParris Desktop"
+
         self._save_metadata(); self._activity("System","Refresh Inventory","Success",f"Fetched {len(endpoints)} endpoints.",f"{int((time.monotonic()-started)*1000)} ms"); self._render_grid(); self.status_var.set(f"Action1: Connected\nOrganisation: {self.org_name} | Refreshed: {time.strftime('%H:%M:%S')}")
 
     def _refresh_failed(self,exc,started):

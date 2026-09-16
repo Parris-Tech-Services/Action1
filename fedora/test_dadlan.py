@@ -39,40 +39,79 @@ class TestDadLAN(unittest.TestCase):
         mock_response.read.return_value = b'{"id": "inst_123"}'
         res = client.run_script("org1", "ep1", "echo 1")
         self.assertEqual(res.get("id"), "inst_123")
-        
-        # Verify the payload structure
+
+        # Verify the payload structure. This shape (and the policies/instances path)
+        # was confirmed 2026-09-09 against the real Action1 API: a run_script instance
+        # created through the Action1 web UI was fetched via
+        # GET /policies/instances/{org}/{id} and used as ground truth, then this exact
+        # request shape was POSTed for real, polled to completion, and its output
+        # matched the target machine's real hostname end to end.
         call_args = mock_urlopen.call_args[0][0]
-        self.assertTrue(call_args.full_url.endswith("automations/instances/org1"))
+        self.assertTrue(call_args.full_url.endswith("policies/instances/org1"))
         payload = json.loads(call_args.data.decode('utf-8'))
-        
+
         expected_payload = {
             "name": "DadLAN Automation",
-            "retry_minutes": "0",
-            "actions": [
-                {
-                    "name": "System Snapshot",
-                    "template_id": "run_script",
-                    "params": {
-                        "display_summary": "DadLAN System Snapshot",
-                        "run_script_params": [],
-                        "run_script_text": "echo 1",
-                        "run_script_language": "PowerShell",
-                        "success_exit_codes": "0",
-                        "reboot_options": {
-                            "auto_reboot": "no"
-                        },
-                        "platform": "Windows"
-                    }
-                }
-            ],
+            "retry_minutes": "1440",
             "endpoints": [
                 {
                     "id": "ep1",
                     "type": "Endpoint"
                 }
+            ],
+            "actions": [
+                {
+                    "name": "Run Script",
+                    "template_id": "run_script",
+                    "params": {
+                        "display_summary": "DadLAN Automation",
+                        "condition_script_text": "",
+                        "condition_script_file_name": "",
+                        "condition_script_language": "PowerShell",
+                        "run_script_params": [],
+                        "run_script_text": "echo 1",
+                        "run_script_file_name": "",
+                        "run_script_language": "PowerShell",
+                        "platform": "Windows",
+                        "reboot_exit_codes": "",
+                        "reboot_options": {
+                            "auto_reboot": "no",
+                            "show_message": "no",
+                            "message_text": "",
+                            "timeout": 240
+                        }
+                    }
+                }
             ]
         }
         self.assertEqual(payload, expected_payload)
+
+    @patch('action1_client.urllib.request.urlopen')
+    def test_wait_for_completion_returns_on_terminal_status(self, mock_urlopen):
+        from action1_client import Action1Client
+        client = Action1Client("Australia", "cid", "sec")
+        mock_response = MagicMock()
+        mock_response.read.return_value = b'{"access_token": "token123", "expires_in": 3600}'
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+        client.authenticate()
+
+        mock_response.read.return_value = b'{"status": "Success", "id": "inst_1"}'
+        result = client.wait_for_completion("org1", "inst_1", timeout_seconds=5, poll_seconds=0)
+        self.assertEqual(result["status"], "Success")
+
+    @patch('action1_client.time.sleep', return_value=None)
+    @patch('action1_client.urllib.request.urlopen')
+    def test_wait_for_completion_times_out_instead_of_looping_forever(self, mock_urlopen, mock_sleep):
+        from action1_client import Action1Client, Action1Error
+        client = Action1Client("Australia", "cid", "sec")
+        mock_response = MagicMock()
+        mock_response.read.return_value = b'{"access_token": "token123", "expires_in": 3600}'
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+        client.authenticate()
+
+        mock_response.read.return_value = b'{"status": "Running", "id": "inst_1"}'
+        with self.assertRaises(Action1Error):
+            client.wait_for_completion("org1", "inst_1", timeout_seconds=0.01, poll_seconds=0.01)
 
     def test_safety_controller_protection(self):
         from dadlan import MachineMeta, DadLANApp

@@ -108,34 +108,63 @@ class Action1Client:
     def endpoint(self, org_id: str, endpoint_id: str) -> dict:
         return self.get(f"endpoints/managed/{urllib.parse.quote(org_id, safe='')}/{urllib.parse.quote(endpoint_id, safe='')}", {"fields": "*"})
 
-    def run_script(self, org_id: str, endpoint_id: str, script_content: str, name: str = "DadLAN Automation") -> dict:
-        return self.post(f"automations/instances/{urllib.parse.quote(org_id, safe='')}", {
+    def run_script(self, org_id: str, endpoint_id: str, script_content: str, name: str = "DadLAN Automation",
+                    retry_minutes: str = "1440", display_summary: str = "DadLAN Automation") -> dict:
+        # Endpoint and payload shape verified 2026-09-09 against the live Action1 API by
+        # inspecting a real UI-created run_script instance (GET /policies/instances/{org}/{id})
+        # and reproducing it programmatically end-to-end (POST -> poll -> matching output).
+        # Creation goes to /policies/instances/{org_id} (matches Action1's own PSAction1
+        # client's New-Action1 Remediation/DeploySoftware mapping); the created instance is
+        # then readable under /automations/instances/{org_id}/{instance_id} either way.
+        return self.post(f"policies/instances/{urllib.parse.quote(org_id, safe='')}", {
             "name": name,
-            "retry_minutes": "0",
-            "actions": [
-                {
-                    "name": "System Snapshot",
-                    "template_id": "run_script",
-                    "params": {
-                        "display_summary": "DadLAN System Snapshot",
-                        "run_script_params": [],
-                        "run_script_text": script_content,
-                        "run_script_language": "PowerShell",
-                        "success_exit_codes": "0",
-                        "reboot_options": {
-                            "auto_reboot": "no"
-                        },
-                        "platform": "Windows"
-                    }
-                }
-            ],
+            "retry_minutes": retry_minutes,
             "endpoints": [
                 {
                     "id": endpoint_id,
                     "type": "Endpoint"
                 }
+            ],
+            "actions": [
+                {
+                    "name": "Run Script",
+                    "template_id": "run_script",
+                    "params": {
+                        "display_summary": display_summary,
+                        "condition_script_text": "",
+                        "condition_script_file_name": "",
+                        "condition_script_language": "PowerShell",
+                        "run_script_params": [],
+                        "run_script_text": script_content,
+                        "run_script_file_name": "",
+                        "run_script_language": "PowerShell",
+                        "platform": "Windows",
+                        "reboot_exit_codes": "",
+                        "reboot_options": {
+                            "auto_reboot": "no",
+                            "show_message": "no",
+                            "message_text": "",
+                            "timeout": 240
+                        }
+                    }
+                }
             ]
         })
+
+    def get_instance(self, org_id: str, instance_id: str) -> dict:
+        return self.get(f"automations/instances/{urllib.parse.quote(org_id, safe='')}/{urllib.parse.quote(instance_id, safe='')}")
+
+    def wait_for_completion(self, org_id: str, instance_id: str, timeout_seconds: int = 120, poll_seconds: int = 4) -> dict:
+        """Poll an instance until it leaves the Running state. Returns the final
+        instance object. Raises Action1Error on timeout rather than looping forever."""
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline:
+            instance = self.get_instance(org_id, instance_id)
+            status = instance.get("status")
+            if status and status != "Running":
+                return instance
+            time.sleep(poll_seconds)
+        raise Action1Error(f"Action1 instance {instance_id} did not complete within {timeout_seconds}s.")
 
     def stop_automation(self, org_id: str, instance_id: str) -> dict:
         return self.post(f"automations/instances/{urllib.parse.quote(org_id, safe='')}/{urllib.parse.quote(instance_id, safe='')}/stop", {})
