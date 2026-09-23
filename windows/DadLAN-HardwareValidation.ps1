@@ -58,6 +58,7 @@ $script:LhmComputer = $null
 $script:SensorProvider = "None"
 $script:Inventory = $null
 $script:BaselineTemps = @{}
+$script:ActiveGuidedProcess = $null
 
 New-Item -ItemType Directory -Path $script:OutDir -Force | Out-Null
 
@@ -121,8 +122,8 @@ function Get-DadLANInventory {
         RAM = @(Get-CimInstance Win32_PhysicalMemory | ForEach-Object {
             [pscustomobject]@{
                 DeviceLocator = $_.DeviceLocator
-                Manufacturer = ($_.Manufacturer -as [string]).Trim()
-                PartNumber = ($_.PartNumber -as [string]).Trim()
+                Manufacturer = if ($null -ne $_.Manufacturer) { ([string]$_.Manufacturer).Trim() } else { $null }
+                PartNumber = if ($null -ne $_.PartNumber) { ([string]$_.PartNumber).Trim() } else { $null }
                 CapacityGB = [math]::Round([double]$_.Capacity / 1GB, 2)
                 Speed = $_.Speed
                 ConfiguredClockSpeed = $_.ConfiguredClockSpeed
@@ -139,8 +140,8 @@ function Get-DadLANInventory {
         })
         Storage = @(Get-CimInstance Win32_DiskDrive | ForEach-Object {
             [pscustomobject]@{
-                Model = ($_.Model -as [string]).Trim()
-                SerialNumber = ($_.SerialNumber -as [string]).Trim()
+                Model = if ($null -ne $_.Model) { ([string]$_.Model).Trim() } else { $null }
+                SerialNumber = if ($null -ne $_.SerialNumber) { ([string]$_.SerialNumber).Trim() } else { $null }
                 FirmwareRevision = $_.FirmwareRevision
                 SizeGB = if ($_.Size) { [math]::Round([double]$_.Size / 1GB, 2) } else { $null }
                 Status = $_.Status
@@ -488,6 +489,14 @@ function Stop-GuidedTool {
         }
     } catch {
     }
+
+    try {
+        if ($script:ActiveGuidedProcess -and $script:ActiveGuidedProcess.Id -eq $Process.Id) {
+            $script:ActiveGuidedProcess = $null
+        }
+    } catch {
+        $script:ActiveGuidedProcess = $null
+    }
 }
 
 function Ask-OcctErrorResult {
@@ -577,6 +586,7 @@ function Invoke-GuidedOcctStage {
 
     Add-DadLANEvent $TestName "Info" "Launching OCCT. $instruction"
     $proc = Start-Process -FilePath $occt -PassThru
+    $script:ActiveGuidedProcess = $proc
     Read-Host "$instruction Once the test is visibly running, press Enter here"
 
     $deadline = (Get-Date).AddMinutes($Minutes)
@@ -598,6 +608,35 @@ function Invoke-GuidedOcctStage {
         }
 
         $sample = Add-DadLANTelemetrySample -Stage $TestName
+
+        $requiredTelemetryMissing = $false
+        $requiredTelemetryReason = $null
+        if ($TestName -eq "CPU/RAM" -and $null -eq $sample.Temperatures.CpuC) {
+            $requiredTelemetryMissing = $true
+            $requiredTelemetryReason = "Required CPU temperature telemetry disappeared during the guided CPU/RAM stage."
+        } elseif ($TestName -eq "GPU" -and $null -eq $sample.Temperatures.GpuC) {
+            $requiredTelemetryMissing = $true
+            $requiredTelemetryReason = "Required GPU temperature telemetry disappeared during the guided GPU stage."
+        }
+
+        if ($requiredTelemetryMissing) {
+            Add-DadLANEvent $TestName "Error" $requiredTelemetryReason
+            Stop-GuidedTool -Process $proc
+            return [pscustomobject]@{
+                Name = $TestName
+                Result = "INCOMPLETE"
+                Reason = $requiredTelemetryReason
+                Started = $stageStart.ToString("o")
+                Finished = (Get-Date).ToString("o")
+                MaxCpuC = $maxCpuC
+                MaxGpuC = $maxGpuC
+                MaxSsdC = $maxSsdC
+                MaxCpuLoadPercent = $maxCpuLoad
+                MaxGpuLoadPercent = $maxGpuLoad
+                MaxRamUsedPercent = $maxRamUsed
+                QualifiedLoadSamples = $qualifiedLoadSamples
+            }
+        }
 
         if ($null -ne $sample.Temperatures.CpuC) { $maxCpuC = [math]::Max([double]$maxCpuC, [double]$sample.Temperatures.CpuC) }
         if ($null -ne $sample.Temperatures.GpuC) { $maxGpuC = [math]::Max([double]$maxGpuC, [double]$sample.Temperatures.GpuC) }
@@ -735,6 +774,7 @@ function Invoke-Cooldown {
     $start = Get-Date
     $deadline = $start.AddMinutes($CooldownMinutes)
     $last = $null
+    $cooled = $false
 
     Add-DadLANEvent "Cooldown" "Info" "Waiting for temperatures to return near baseline before the next load stage."
 
@@ -753,6 +793,7 @@ function Invoke-Cooldown {
         }
 
         if ($cpuReady -and $gpuReady) {
+            $cooled = $true
             break
         }
 
@@ -761,8 +802,13 @@ function Invoke-Cooldown {
 
     [pscustomobject]@{
         Name = "Cooldown"
-        Result = "PASS"
-        Reason = "Cooldown completed or reached the configured cooldown timeout."
+        Result = if ($cooled) { "PASS" } else { "INCOMPLETE" }
+        Reason = if ($cooled) {
+            "Temperatures returned within 7 C of baseline."
+        } else {
+            "Cooldown timed out before temperatures returned within 7 C of baseline; the next load stage must not start."
+        }
+        ReadyForNextLoad = $cooled
         FinalTemperatures = if ($last) { $last.Temperatures } else { $null }
     }
 }
@@ -860,12 +906,26 @@ try {
         $stages += Invoke-GuidedOcctStage -TestName "CPU/RAM" -Minutes $CpuRamMinutes
     }
 
+    $cooldown = $null
     if ($Mode -eq "GuidedFull") {
-        $stages += Invoke-Cooldown
+        $cooldown = Invoke-Cooldown
+        $stages += $cooldown
     }
 
-    if ($Mode -in @("GpuGuide", "GuidedFull")) {
+    if ($Mode -eq "GpuGuide") {
         $stages += Invoke-GuidedOcctStage -TestName "GPU" -Minutes $GpuMinutes
+    } elseif ($Mode -eq "GuidedFull") {
+        if ($cooldown -and $cooldown.Result -eq "PASS" -and $cooldown.ReadyForNextLoad) {
+            $stages += Invoke-GuidedOcctStage -TestName "GPU" -Minutes $GpuMinutes
+        } else {
+            $reason = "GPU stage skipped because cooldown readiness was not established."
+            Add-DadLANEvent "GPU" "Warning" $reason
+            $stages += [pscustomobject]@{
+                Name = "GPU"
+                Result = "INCOMPLETE"
+                Reason = $reason
+            }
+        }
     }
 
     $stages += Invoke-StorageHealth
@@ -959,6 +1019,14 @@ try {
     Write-Output "DADLAN_VALIDATION_END"
     exit 1
 } finally {
+    if ($script:ActiveGuidedProcess) {
+        try {
+            Add-DadLANEvent "Safety" "Warning" "Stopping active guided load generator during final cleanup."
+        } catch {
+        }
+        Stop-GuidedTool -Process $script:ActiveGuidedProcess
+    }
+
     if ($script:LhmComputer) {
         try { $script:LhmComputer.Close() } catch {}
     }
