@@ -153,16 +153,34 @@ function Get-DadLANInventory {
 }
 
 function Find-LibreHardwareMonitorLibrary {
-    $candidates = @(
+    $candidates = New-Object System.Collections.Generic.List[string]
+
+    foreach ($path in @(
         (Join-Path $PSScriptRoot "LibreHardwareMonitorLib.dll"),
         "C:\Program Files\LibreHardwareMonitor\LibreHardwareMonitorLib.dll",
         "C:\Program Files (x86)\LibreHardwareMonitor\LibreHardwareMonitorLib.dll",
         "C:\Tools\LibreHardwareMonitor\LibreHardwareMonitorLib.dll",
-        "C:\DadLAN\Tools\LibreHardwareMonitor\LibreHardwareMonitorLib.dll"
-    )
+        "C:\DadLAN\Tools\LibreHardwareMonitor\LibreHardwareMonitorLib.dll",
+        (Join-Path $HOME "Desktop\LibreHardwareMonitor\LibreHardwareMonitorLib.dll"),
+        (Join-Path $HOME "Downloads\LibreHardwareMonitor\LibreHardwareMonitorLib.dll"),
+        (Join-Path $HOME "Documents\LibreHardwareMonitor\LibreHardwareMonitorLib.dll")
+    )) {
+        if ($path) { [void]$candidates.Add($path) }
+    }
 
-    foreach ($path in $candidates) {
-        if ($path -and (Test-Path $path)) {
+    try {
+        $runningLhm = Get-Process -Name "LibreHardwareMonitor" -ErrorAction Stop | Select-Object -First 1
+        if ($runningLhm -and $runningLhm.Path) {
+            $runningDir = Split-Path -Parent $runningLhm.Path
+            if ($runningDir) {
+                [void]$candidates.Insert(0, (Join-Path $runningDir "LibreHardwareMonitorLib.dll"))
+            }
+        }
+    } catch {
+    }
+
+    foreach ($path in $candidates | Select-Object -Unique) {
+        if ($path -and (Test-Path $path -PathType Leaf)) {
             return $path
         }
     }
