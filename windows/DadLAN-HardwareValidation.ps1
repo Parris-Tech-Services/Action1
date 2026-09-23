@@ -221,7 +221,26 @@ function Initialize-DadLANSensors {
         $script:SensorProvider = "LibreHardwareMonitor-Library"
         Add-DadLANEvent "Sensors" "Info" "Loaded LibreHardwareMonitor library." @{ Path = $dll }
     } catch {
-        Add-DadLANEvent "Sensors" "Warning" "LibreHardwareMonitor library could not be loaded." @{ Error = $_.Exception.Message }
+        $blockedByWindows = $false
+        try {
+            $zone = Get-Item -LiteralPath $dll -Stream Zone.Identifier -ErrorAction Stop
+            $blockedByWindows = $null -ne $zone
+        } catch {
+        }
+
+        $message = if ($blockedByWindows) {
+            "LibreHardwareMonitor library is blocked by Windows (Mark-of-the-Web). Unblock the trusted LibreHardwareMonitor files before retrying."
+        } else {
+            "LibreHardwareMonitor library could not be loaded."
+        }
+
+        Add-DadLANEvent "Sensors" "Warning" $message @{
+            Path = $dll
+            Error = $_.Exception.Message
+            MarkOfTheWeb = $blockedByWindows
+            PowerShellVersion = $PSVersionTable.PSVersion.ToString()
+            PSEdition = $PSVersionTable.PSEdition
+        }
     }
 }
 
