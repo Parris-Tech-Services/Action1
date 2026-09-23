@@ -28,3 +28,18 @@ Remote actions are strictly bounded:
 5. All executions require an explicit confirmation prompt.
 
 Do not add an unrestricted fleet-wide arbitrary-script button.
+
+
+## Hardware validation safeguards
+
+v0.4-dev adds hardware validation without adding an unrestricted remote shell.
+
+- Action1 runs the Hardware Validation script in its safe default `Baseline` mode only.
+- The baseline collects inventory, telemetry and Windows storage-health data; it does not start OCCT or another load generator.
+- Guided OCCT stages require local `-Interactive` execution and an operator Start click.
+- DadLAN does not invent undocumented OCCT command-line arguments.
+- CPU/RAM and GPU stages are separated by cooldown; the workflow never deliberately starts a combined CPU+GPU power test.
+- Thermal guards are explicit. If a trustworthy CPU sensor is unavailable, the CPU/RAM stage is `INCOMPLETE` unless the operator explicitly accepts a fallback sensor.
+- The runner may close the OCCT process at the end of a bounded interval or after a thermal abort; it does not terminate unrelated processes.
+- BIOS/UEFI settings, XMP, clocks, voltages, GPU power limits, firmware and drivers are not modified.
+- `INCOMPLETE` must never be promoted to `PASS` merely because no crash occurred.
