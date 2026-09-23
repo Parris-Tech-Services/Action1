@@ -784,12 +784,14 @@ function Invoke-Cooldown {
         $cpuReady = $true
         $gpuReady = $true
 
-        if ($null -ne $last.Temperatures.CpuC -and $null -ne $script:BaselineTemps.CpuC) {
-            $cpuReady = $last.Temperatures.CpuC -le ([double]$script:BaselineTemps.CpuC + 7)
+        if ($null -ne $script:BaselineTemps.CpuC) {
+            $cpuReady = ($null -ne $last.Temperatures.CpuC) -and
+                ($last.Temperatures.CpuC -le ([double]$script:BaselineTemps.CpuC + 7))
         }
 
-        if ($null -ne $last.Temperatures.GpuC -and $null -ne $script:BaselineTemps.GpuC) {
-            $gpuReady = $last.Temperatures.GpuC -le ([double]$script:BaselineTemps.GpuC + 7)
+        if ($null -ne $script:BaselineTemps.GpuC) {
+            $gpuReady = ($null -ne $last.Temperatures.GpuC) -and
+                ($last.Temperatures.GpuC -le ([double]$script:BaselineTemps.GpuC + 7))
         }
 
         if ($cpuReady -and $gpuReady) {
