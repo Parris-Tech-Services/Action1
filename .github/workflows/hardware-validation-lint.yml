@@ -18,3 +18,6 @@ jobs:
       - name: Parse hardware validation PowerShell
         shell: powershell
         run: .\windows\Test-DadLAN-HardwareValidation.ps1
+      - name: Exercise safety failure paths without hardware load
+        shell: powershell
+        run: .\windows\Test-DadLAN-HardwareSafety.ps1

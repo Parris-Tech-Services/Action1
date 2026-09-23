@@ -43,7 +43,9 @@ v0.4-dev adds hardware validation without adding an unrestricted remote shell.
 - The runner may close the OCCT process at the end of a bounded interval or after a thermal abort; it does not terminate unrelated processes.
 - BIOS/UEFI settings, XMP, clocks, voltages, GPU power limits, firmware and drivers are not modified.
 - `INCOMPLETE` must never be promoted to `PASS` merely because no crash occurred.
-
+- Both hardware runner files must be packaged together. Guided jobs use suspended launch into a kill-on-close Job Object; process-tree ownership avoids killing unrelated applications. A 15-second sampling watchdog and `finally` cleanup terminate the owned job on stalled or failed monitoring.
+- No console input is awaited under active load. Sensor loss and failed/timed-out cooldown prevent subsequent stages. OCCT's temperature/error/WHEA stops must be checked before launch; the operator verifies that the supplied configuration is active.
+- Imported historical facts retain their evidence labels and never replace live sensor guards. Public examples contain no endpoint serial numbers or private screenshots.
 
 ### OCCT preflight added in v0.4.1-dev
 

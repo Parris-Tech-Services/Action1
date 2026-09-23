@@ -1,5 +1,5 @@
 # DadLAN-HardwareValidation.ps1
-# v0.4.0-dev - safe Windows hardware validation orchestration.
+# v0.4.2-dev - safe Windows hardware validation orchestration.
 #
 # Remote/Action1-safe default: Baseline
 # Guided load testing: run locally with -Mode GuidedFull -Interactive
@@ -37,6 +37,10 @@ param(
 
     [switch]$Interactive,
     [switch]$AllowFallbackTemperature,
+    [string]$OcctPath,
+    [string]$OcctConfigPath,
+    [string]$SensorSnapshotPath,
+    [string]$EvidenceManifestPath,
     [switch]$DryRun
 )
 
@@ -44,7 +48,7 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
-$script:Version = "0.4.1-dev"
+$script:Version = "0.4.2-dev"
 $script:Started = Get-Date
 $script:Stamp = $script:Started.ToString("yyyyMMdd-HHmmss")
 $script:OutDir = Join-Path $env:ProgramData "DadLAN\HardwareValidation\$env:COMPUTERNAME-$script:Stamp"
@@ -58,9 +62,8 @@ $script:LhmComputer = $null
 $script:SensorProvider = "None"
 $script:Inventory = $null
 $script:BaselineTemps = @{}
-$script:ActiveGuidedProcess = $null
-$script:OcctConfigPath = $null
-$script:UiAutomationLoaded = $false
+$script:BaselineSample = $null
+$script:ImportedEvidence = @()
 
 New-Item -ItemType Directory -Path $script:OutDir -Force | Out-Null
 
@@ -114,7 +117,7 @@ function Get-DadLANInventory {
         }
         CPU = @(Get-CimInstance Win32_Processor | ForEach-Object {
             [pscustomobject]@{
-                Name = $_.Name.Trim()
+                Name = ([string]$_.Name).Trim()
                 Cores = $_.NumberOfCores
                 LogicalProcessors = $_.NumberOfLogicalProcessors
                 MaxClockMHz = $_.MaxClockSpeed
@@ -226,7 +229,8 @@ function Get-LhmRows {
     param($Hardware)
 
     $rows = @()
-    try { $Hardware.Update() } catch {}
+    # A failed refresh must never reuse the previous, potentially cold value.
+    $Hardware.Update()
 
     foreach ($sensor in @($Hardware.Sensors)) {
         $rows += [pscustomobject]@{
@@ -246,7 +250,7 @@ function Get-LhmRows {
     return $rows
 }
 
-function Get-DadLANSensors {
+function Get-DadLANPrimarySensors {
     if ($script:SensorProvider -eq "LibreHardwareMonitor-WMI") {
         try {
             return @(Get-CimInstance -Namespace "root\LibreHardwareMonitor" -ClassName Sensor -ErrorAction Stop | ForEach-Object {
@@ -260,7 +264,7 @@ function Get-DadLANSensors {
                 }
             })
         } catch {
-            return @()
+            throw "LibreHardwareMonitor telemetry failed: $($_.Exception.Message)"
         }
     }
 
@@ -294,76 +298,16 @@ function Get-DadLANUsage {
     }
 }
 
-function Get-DadLANTemperatureState {
-    param([object[]]$Sensors)
 
-    $trustedCpu = @($Sensors | Where-Object {
-        $_.SensorType -eq "Temperature" -and
-        ($_.Identifier -match "^/cpu" -or $_.HardwareType -match "(?i)cpu")
-    })
-
-    $namedCpu = @($Sensors | Where-Object {
-        $_.SensorType -eq "Temperature" -and
-        $_.SensorName -match "(?i)CPU|Package|Socket|Tctl|Tdie"
-    })
-
-    $profileCpu = @()
-    $isKnownFxBoard =
-        ($script:Inventory.Motherboard.Product -match "(?i)CROSSHAIR V FORMULA-Z") -and
-        (($script:Inventory.CPU | Select-Object -First 1).Name -match "(?i)FX.*6300")
-
-    if ($isKnownFxBoard) {
-        $profileCpu = @($Sensors | Where-Object {
-            $_.SensorType -eq "Temperature" -and
-            $_.Identifier -eq "/lpc/it8721f/0/temperature/0"
-        })
-    }
-
-    $cpuC = $null
-    $cpuSource = $null
-    $cpuTrust = "None"
-
-    if ($trustedCpu.Count -gt 0) {
-        $s = $trustedCpu | Sort-Object Value -Descending | Select-Object -First 1
-        $cpuC = $s.Value
-        $cpuSource = "$($s.HardwareName) / $($s.SensorName)"
-        $cpuTrust = "Trusted"
-    } elseif ($namedCpu.Count -gt 0) {
-        $s = $namedCpu | Sort-Object Value -Descending | Select-Object -First 1
-        $cpuC = $s.Value
-        $cpuSource = "$($s.HardwareName) / $($s.SensorName)"
-        $cpuTrust = "Fallback"
-    } elseif ($profileCpu.Count -gt 0) {
-        $s = $profileCpu | Select-Object -First 1
-        $cpuC = $s.Value
-        $cpuSource = "Crosshair V Formula-Z IT8721F Temperature #1 (unverified CPU/socket fallback)"
-        $cpuTrust = "ProfileFallback"
-    }
-
-    $gpu = @($Sensors | Where-Object {
-        $_.SensorType -eq "Temperature" -and $_.Identifier -match "^/gpu"
-    } | Sort-Object Value -Descending) | Select-Object -First 1
-
-    $ssd = @($Sensors | Where-Object {
-        $_.SensorType -eq "Temperature" -and $_.Identifier -match "^/(ssd|hdd|storage)"
-    } | Sort-Object Value -Descending) | Select-Object -First 1
-
-    [pscustomobject]@{
-        CpuC = $cpuC
-        CpuSource = $cpuSource
-        CpuTrust = $cpuTrust
-        GpuC = if ($gpu) { $gpu.Value } else { $null }
-        GpuSource = if ($gpu) { "$($gpu.HardwareName) / $($gpu.SensorName)" } else { $null }
-        SsdC = if ($ssd) { $ssd.Value } else { $null }
-        SsdSource = if ($ssd) { "$($ssd.HardwareName) / $($ssd.SensorName)" } else { $null }
-    }
-}
 
 function Get-DadLANGpuLoad {
     param([object[]]$Sensors)
 
     $loads = @($Sensors | Where-Object {
-        $_.SensorType -eq "Load" -and $_.Identifier -match "^/gpu"
+        $_.SensorType -eq "Load" -and $_.Identifier -match "^/gpu" -and
+        $_.SensorName -match '^(GPU Core|D3D 3D|GPU D3D Usage|GPU Utilization)$' -and
+        $null -ne $_.Value -and -not [double]::IsNaN([double]$_.Value) -and
+        -not [double]::IsInfinity([double]$_.Value)
     })
 
     if ($loads.Count -eq 0) {
@@ -391,6 +335,10 @@ function Add-DadLANTelemetrySample {
             SensorType = $sensor.SensorType
             Identifier = $sensor.Identifier
             Value = $sensor.Value
+            Source = $sensor.Source
+            ObservedAt = $sensor.ObservedAt
+            Confidence = $sensor.Confidence
+            EvidenceStatus = 'MEASURED'
         })
     }
 
@@ -407,6 +355,10 @@ function Add-DadLANTelemetrySample {
             SensorType = "Load"
             Identifier = $item.Id
             Value = $item.Value
+            Source = 'Windows CIM'
+            ObservedAt = $now.ToString('o')
+            Confidence = 'ProviderReported'
+            EvidenceStatus = 'MEASURED'
         })
     }
 
@@ -430,6 +382,12 @@ function Get-EffectiveCpuAbort {
 function Test-ThermalAbort {
     param($Sample)
 
+    foreach ($reading in @($Sample.Temperatures.CpuReadings)) {
+        if ($reading.Value -ge $reading.AbortC) {
+            return "CPU guard $($reading.Source) reached $($reading.Value) C (limit $($reading.AbortC) C)."
+        }
+    }
+
     $effectiveCpuAbort = Get-EffectiveCpuAbort -TemperatureState $Sample.Temperatures
 
     if ($null -ne $Sample.Temperatures.CpuC -and $Sample.Temperatures.CpuC -ge $effectiveCpuAbort) {
@@ -448,7 +406,10 @@ function Test-ThermalAbort {
 }
 
 function Invoke-Baseline {
-    $sample = Add-DadLANTelemetrySample -Stage "Baseline"
+    try { $sample = Add-DadLANTelemetrySample -Stage "Baseline" } catch {
+        return [pscustomobject]@{Name='Baseline';Result='INCOMPLETE';Reason="Inventory collected; telemetry unavailable: $($_.Exception.Message)"}
+    }
+    $script:BaselineSample = $sample
 
     $script:BaselineTemps = @{
         CpuC = $sample.Temperatures.CpuC
@@ -459,7 +420,6 @@ function Invoke-Baseline {
     [pscustomobject]@{
         Name = "Baseline"
         Result = "PASS"
-        EvidenceClass = "MEASURED"
         Reason = "Baseline inventory and telemetry captured."
         SensorProvider = $script:SensorProvider
         Temperatures = $sample.Temperatures
@@ -467,226 +427,11 @@ function Invoke-Baseline {
     }
 }
 
-function Find-OcctConfig {
-    param([string]$OcctPath)
-
-    $candidates = @(
-        (Join-Path $env:USERPROFILE "Downloads\OCCT.config.json"),
-        (Join-Path $env:APPDATA "OCCT\OCCT.config.json"),
-        (Join-Path $env:LOCALAPPDATA "OCCT\OCCT.config.json")
-    )
-
-    if ($OcctPath) {
-        $occtDir = Split-Path -Parent $OcctPath
-        $candidates = @(
-            (Join-Path $occtDir "OCCT.config.json"),
-            (Join-Path $occtDir "config\OCCT.config.json")
-        ) + $candidates
-    }
-
-    foreach ($path in $candidates | Select-Object -Unique) {
-        if ($path -and (Test-Path $path)) {
-            return $path
-        }
-    }
-
-    return $null
-}
-
-function Get-OcctSafetyStatus {
-    param(
-        [string]$ConfigPath,
-        [double]$RequiredTemperatureLimitC
-    )
-
-    if (-not $ConfigPath -or -not (Test-Path $ConfigPath)) {
-        return [pscustomobject]@{
-            Verified = $false
-            ConfigPath = $null
-            StopOnError = $null
-            StopOnWheaError = $null
-            TemperatureStopEnabled = $null
-            TemperatureAlertValueC = $null
-            AllowOcbaseUpload = $null
-            Reason = "OCCT configuration file was not found, so its internal safety stops cannot be verified."
-        }
-    }
-
-    try {
-        $config = Get-Content -LiteralPath $ConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-        $tempEnabled = [bool]$config.IsTemperatureAlertValueEnabled
-        $tempLimit = if ($null -ne $config.TemperatureAlertValue) { [double]$config.TemperatureAlertValue } else { $null }
-        $stopOnError = [bool]$config.StopOnError
-        $stopOnWhea = [bool]$config.StopOnWheaError
-        $upload = if ($null -ne $config.AllowOcbaseUpload) { [bool]$config.AllowOcbaseUpload } else { $null }
-
-        $safeTemp = $tempEnabled -and ($null -ne $tempLimit) -and ($tempLimit -le $RequiredTemperatureLimitC)
-        $verified = $stopOnError -and $stopOnWhea -and $safeTemp
-
-        $reason = if ($verified) {
-            "OCCT internal temperature, error and WHEA stops are enabled at or below the DadLAN limit."
-        } else {
-            "OCCT safety preflight failed. Require StopOnError=true, StopOnWheaError=true, and temperature stop enabled at or below $RequiredTemperatureLimitC C."
-        }
-
-        return [pscustomobject]@{
-            Verified = $verified
-            ConfigPath = $ConfigPath
-            StopOnError = $stopOnError
-            StopOnWheaError = $stopOnWhea
-            TemperatureStopEnabled = $tempEnabled
-            TemperatureAlertValueC = $tempLimit
-            AllowOcbaseUpload = $upload
-            Reason = $reason
-        }
-    } catch {
-        return [pscustomobject]@{
-            Verified = $false
-            ConfigPath = $ConfigPath
-            StopOnError = $null
-            StopOnWheaError = $null
-            TemperatureStopEnabled = $null
-            TemperatureAlertValueC = $null
-            AllowOcbaseUpload = $null
-            Reason = "OCCT configuration could not be parsed: $($_.Exception.Message)"
-        }
-    }
-}
-
-function Initialize-UiAutomation {
-    if ($script:UiAutomationLoaded) {
-        return $true
-    }
-
-    try {
-        Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
-        $script:UiAutomationLoaded = $true
-        return $true
-    } catch {
-        Add-DadLANEvent "OCCT" "Warning" "Windows UI Automation could not be loaded; OCCT Tctl/TSI telemetry will be unavailable." @{
-            Error = $_.Exception.Message
-        }
-        return $false
-    }
-}
-
-function Get-OcctUiTelemetry {
-    if (-not (Initialize-UiAutomation)) {
-        return $null
-    }
-
-    $occtProcess = Get-Process -Name "OCCTGUI" -ErrorAction SilentlyContinue | Where-Object {
-        $_.MainWindowHandle -ne 0
-    } | Select-Object -First 1
-
-    if (-not $occtProcess) {
-        return $null
-    }
-
-    try {
-        $root = [System.Windows.Automation.AutomationElement]::FromHandle($occtProcess.MainWindowHandle)
-        if (-not $root) {
-            return $null
-        }
-
-        $condition = New-Object System.Windows.Automation.PropertyCondition(
-            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-            [System.Windows.Automation.ControlType]::Text
-        )
-        $nodes = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition)
-        $names = @(
-            foreach ($node in $nodes) {
-                [string]$node.Current.Name
-            }
-        )
-
-        function Find-TemperatureAfterLabel {
-            param(
-                [string[]]$Items,
-                [string]$Label
-            )
-
-            for ($i = 0; $i -lt $Items.Count; $i++) {
-                if ($Items[$i] -eq $Label) {
-                    $limit = [math]::Min($Items.Count - 1, $i + 6)
-                    for ($j = $i + 1; $j -le $limit; $j++) {
-                        if ($Items[$j] -match "(-?\d+(?:\.\d+)?)\s*.*C") {
-                            return [double]$matches[1]
-                        }
-                    }
-                }
-            }
-
-            return $null
-        }
-
-        return [pscustomobject]@{
-            CapturedAt = (Get-Date).ToString("o")
-            CpuTctlC = Find-TemperatureAfterLabel -Items $names -Label "CPU (Tctl)"
-            CpuPackageTsiC = Find-TemperatureAfterLabel -Items $names -Label "CPU Package (TSI)"
-            NoErrorsDetectedText = @($names | Where-Object { $_ -match "(?i)^No errors detected$" }).Count -gt 0
-            ScheduleCompletedText = @($names | Where-Object { $_ -match "(?i)^Schedule - Completed$" }).Count -gt 0
-        }
-    } catch {
-        return $null
-    }
-}
-
-function Add-OcctUiTelemetry {
-    param(
-        [string]$Stage,
-        $OcctUi
-    )
-
-    if (-not $OcctUi) {
-        return
-    }
-
-    foreach ($item in @(
-        [pscustomobject]@{ Name = "CPU (Tctl)"; Value = $OcctUi.CpuTctlC; Id = "/occt-ui/cpu-tctl" },
-        [pscustomobject]@{ Name = "CPU Package (TSI)"; Value = $OcctUi.CpuPackageTsiC; Id = "/occt-ui/cpu-package-tsi" }
-    )) {
-        if ($null -ne $item.Value) {
-            [void]$script:Telemetry.Add([pscustomobject]@{
-                Timestamp = $OcctUi.CapturedAt
-                Stage = $Stage
-                Kind = "OCCT_UI"
-                Hardware = "CPU"
-                Sensor = $item.Name
-                SensorType = "Temperature"
-                Identifier = $item.Id
-                Value = $item.Value
-            })
-        }
-    }
-}
-
-function Get-ConservativeCpuTemperature {
-    param(
-        $Sample,
-        $OcctUi
-    )
-
-    $values = @()
-
-    if ($Sample -and $Sample.Temperatures -and $null -ne $Sample.Temperatures.CpuC) {
-        $values += [double]$Sample.Temperatures.CpuC
-    }
-    if ($OcctUi -and $null -ne $OcctUi.CpuTctlC) {
-        $values += [double]$OcctUi.CpuTctlC
-    }
-    if ($OcctUi -and $null -ne $OcctUi.CpuPackageTsiC) {
-        $values += [double]$OcctUi.CpuPackageTsiC
-    }
-
-    if ($values.Count -eq 0) {
-        return $null
-    }
-
-    return [double](($values | Measure-Object -Maximum).Maximum)
-}
-
 function Find-Occt {
+    if ($OcctPath) {
+        if (Test-Path -LiteralPath $OcctPath -PathType Leaf) { return (Resolve-Path -LiteralPath $OcctPath).Path }
+        return $null
+    }
     $paths = @(
         "C:\Program Files\OCCT\OCCT.exe",
         "C:\Program Files (x86)\OCCT\OCCT.exe",
@@ -708,395 +453,18 @@ function Find-Occt {
     return $null
 }
 
-function Stop-GuidedTool {
-    param($Process)
 
-    if (-not $Process) {
-        return
-    }
-
-    try {
-        if (-not $Process.HasExited) {
-            [void]$Process.CloseMainWindow()
-            Start-Sleep -Seconds 2
-        }
-    } catch {
-    }
-
-    try {
-        if (-not $Process.HasExited) {
-            Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
-        }
-    } catch {
-    }
-
-    try {
-        if ($script:ActiveGuidedProcess -and $script:ActiveGuidedProcess.Id -eq $Process.Id) {
-            $script:ActiveGuidedProcess = $null
-        }
-    } catch {
-        $script:ActiveGuidedProcess = $null
-    }
-}
 
 function Ask-OcctErrorResult {
-    $answer = Read-Host "Does OCCT currently show ZERO errors for this monitored interval? Type Y, N, or U for unknown"
-    if ($answer -match "^(?i)y") { return "ZeroErrorsConfirmed" }
-    if ($answer -match "^(?i)n") { return "ErrorsReported" }
+    $answer = Read-Host "OCCT is now stopped. Did you record ZERO errors for the complete interval? Type Y, N, or U if not recorded"
+    if ($answer -match "^(?i)y$") { return "ZeroErrorsConfirmed" }
+    if ($answer -match "^(?i)n$") { return "ErrorsReported" }
     return "Unknown"
 }
 
-function Invoke-GuidedOcctStage {
-    param(
-        [ValidateSet("CPU/RAM", "GPU")]
-        [string]$TestName,
-        [int]$Minutes
-    )
 
-    $stageStart = Get-Date
-    $pre = Add-DadLANTelemetrySample -Stage "$TestName-Preflight"
 
-    if (-not $Interactive) {
-        return [pscustomobject]@{
-            Name = $TestName
-            Result = "INCOMPLETE"
-            Reason = "Interactive mode is required for consumer OCCT guided testing."
-        }
-    }
 
-    if ($script:SensorProvider -eq "None") {
-        return [pscustomobject]@{
-            Name = $TestName
-            Result = "INCOMPLETE"
-            Reason = "LibreHardwareMonitor sensors are unavailable, so automatic thermal abort protection is unavailable."
-        }
-    }
-
-    if ($TestName -eq "CPU/RAM") {
-        if ($pre.Temperatures.CpuTrust -eq "None") {
-            return [pscustomobject]@{
-                Name = $TestName
-                Result = "INCOMPLETE"
-                Reason = "No CPU temperature or accepted fallback sensor is available."
-            }
-        }
-
-        if ($pre.Temperatures.CpuTrust -ne "Trusted" -and -not $AllowFallbackTemperature) {
-            return [pscustomobject]@{
-                Name = $TestName
-                Result = "INCOMPLETE"
-                Reason = "Only a fallback CPU temperature source is available. Re-run with -AllowFallbackTemperature only if you accept that limitation."
-                CpuTemperatureSource = $pre.Temperatures.CpuSource
-                CpuTemperatureTrust = $pre.Temperatures.CpuTrust
-            }
-        }
-    }
-
-    if ($TestName -eq "GPU" -and $null -eq $pre.Temperatures.GpuC) {
-        return [pscustomobject]@{
-            Name = $TestName
-            Result = "INCOMPLETE"
-            Reason = "No GPU temperature sensor is available."
-        }
-    }
-
-    $occt = Find-Occt
-    if (-not $occt) {
-        return [pscustomobject]@{
-            Name = $TestName
-            Result = "INCOMPLETE"
-            EvidenceClass = "UNKNOWN"
-            Reason = "OCCT executable was not found in known locations."
-        }
-    }
-
-    $requiredOcctTempLimit = if ($TestName -eq "CPU/RAM") { $CpuAbortC } else { $GpuAbortC }
-    $occtConfig = Find-OcctConfig -OcctPath $occt
-    $occtSafety = Get-OcctSafetyStatus -ConfigPath $occtConfig -RequiredTemperatureLimitC $requiredOcctTempLimit
-
-    if (-not $occtSafety.Verified) {
-        Add-DadLANEvent $TestName "Warning" $occtSafety.Reason $occtSafety
-        return [pscustomobject]@{
-            Name = $TestName
-            Result = "INCOMPLETE"
-            EvidenceClass = "MEASURED"
-            Reason = $occtSafety.Reason
-            OcctSafety = $occtSafety
-            Note = "DadLAN does not change OCCT configuration automatically. Enable and verify the required OCCT stops, then re-run."
-        }
-    }
-
-    if ($occtSafety.AllowOcbaseUpload -eq $true) {
-        Add-DadLANEvent $TestName "Warning" "OCCT allows OCBASE upload. This does not block testing, but review it if local-only evidence is preferred."
-    }
-
-    if ($DryRun) {
-        return [pscustomobject]@{
-            Name = $TestName
-            Result = "INCOMPLETE"
-            Reason = "Dry-run mode; OCCT was not launched."
-            OCCTPath = $occt
-        }
-    }
-
-    $instruction = if ($TestName -eq "CPU/RAM") {
-        "In OCCT start a CPU + RAM test only. Do NOT select Power or a combined GPU load."
-    } else {
-        "In OCCT start a GPU-only test. Do NOT select Power or a combined CPU + GPU test."
-    }
-
-    Add-DadLANEvent $TestName "Info" "Launching OCCT. $instruction"
-    $proc = Start-Process -FilePath $occt -PassThru
-    $script:ActiveGuidedProcess = $proc
-    Read-Host "$instruction Once the test is visibly running, press Enter here"
-
-    $deadline = (Get-Date).AddMinutes($Minutes)
-    $maxCpuC = $pre.Temperatures.CpuC
-    $maxGpuC = $pre.Temperatures.GpuC
-    $maxSsdC = $pre.Temperatures.SsdC
-    $maxCpuLoad = 0
-    $maxGpuLoad = 0
-    $maxRamUsed = if ($null -ne $pre.Usage.RamUsedPercent) { [double]$pre.Usage.RamUsedPercent } else { 0 }
-    $baselineRamUsed = $maxRamUsed
-    $qualifiedLoadSamples = 0
-    $requiredQualifiedSamples = [math]::Max(3, [math]::Ceiling(10.0 / $SampleSeconds))
-    $exitEarly = $false
-
-    while ((Get-Date) -lt $deadline) {
-        if ($proc.HasExited) {
-            $exitEarly = $true
-            break
-        }
-
-        $sample = Add-DadLANTelemetrySample -Stage $TestName
-        $occtUi = Get-OcctUiTelemetry
-        Add-OcctUiTelemetry -Stage $TestName -OcctUi $occtUi
-        $conservativeCpuC = Get-ConservativeCpuTemperature -Sample $sample -OcctUi $occtUi
-
-        $requiredTelemetryMissing = $false
-        $requiredTelemetryReason = $null
-        if ($TestName -eq "CPU/RAM" -and $null -eq $conservativeCpuC) {
-            $requiredTelemetryMissing = $true
-            $requiredTelemetryReason = "All usable CPU temperature telemetry disappeared during the guided CPU/RAM stage."
-        } elseif ($TestName -eq "GPU" -and $null -eq $sample.Temperatures.GpuC) {
-            $requiredTelemetryMissing = $true
-            $requiredTelemetryReason = "Required GPU temperature telemetry disappeared during the guided GPU stage."
-        }
-
-        if ($requiredTelemetryMissing) {
-            Add-DadLANEvent $TestName "Error" $requiredTelemetryReason
-            Stop-GuidedTool -Process $proc
-            return [pscustomobject]@{
-                Name = $TestName
-                Result = "INCOMPLETE"
-                Reason = $requiredTelemetryReason
-                Started = $stageStart.ToString("o")
-                Finished = (Get-Date).ToString("o")
-                MaxCpuC = $maxCpuC
-                MaxGpuC = $maxGpuC
-                MaxSsdC = $maxSsdC
-                MaxCpuLoadPercent = $maxCpuLoad
-                MaxGpuLoadPercent = $maxGpuLoad
-                MaxRamUsedPercent = $maxRamUsed
-                QualifiedLoadSamples = $qualifiedLoadSamples
-            }
-        }
-
-        if ($null -ne $conservativeCpuC) {
-            if ($null -eq $maxCpuC) { $maxCpuC = [double]$conservativeCpuC }
-            else { $maxCpuC = [math]::Max([double]$maxCpuC, [double]$conservativeCpuC) }
-        }
-        if ($null -ne $sample.Temperatures.GpuC) { $maxGpuC = [math]::Max([double]$maxGpuC, [double]$sample.Temperatures.GpuC) }
-        if ($null -ne $sample.Temperatures.SsdC) { $maxSsdC = [math]::Max([double]$maxSsdC, [double]$sample.Temperatures.SsdC) }
-        if ($null -ne $sample.Usage.CpuLoadPercent) { $maxCpuLoad = [math]::Max($maxCpuLoad, [double]$sample.Usage.CpuLoadPercent) }
-        if ($null -ne $sample.Usage.RamUsedPercent) { $maxRamUsed = [math]::Max($maxRamUsed, [double]$sample.Usage.RamUsedPercent) }
-
-        $gpuLoad = Get-DadLANGpuLoad -Sensors $sample.Sensors
-        if ($null -ne $gpuLoad) {
-            $maxGpuLoad = [math]::Max($maxGpuLoad, $gpuLoad)
-        }
-
-        if ($TestName -eq "CPU/RAM") {
-            if ($null -ne $sample.Usage.CpuLoadPercent -and $sample.Usage.CpuLoadPercent -ge 70) {
-                $qualifiedLoadSamples++
-            }
-        } elseif ($null -ne $gpuLoad -and $gpuLoad -ge 50) {
-            $qualifiedLoadSamples++
-        }
-
-        $effectiveCpuAbort = Get-EffectiveCpuAbort -TemperatureState $sample.Temperatures
-        $thermalAbort = $null
-        if ($null -ne $conservativeCpuC -and $conservativeCpuC -ge $effectiveCpuAbort) {
-            $thermalAbort = "CPU temperature guard reached $conservativeCpuC C (limit $effectiveCpuAbort C; conservative maximum across available socket/Tctl/TSI sources)."
-        } else {
-            $thermalAbort = Test-ThermalAbort -Sample $sample
-        }
-        if ($thermalAbort) {
-            Add-DadLANEvent $TestName "Error" $thermalAbort
-            Stop-GuidedTool -Process $proc
-            return [pscustomobject]@{
-                Name = $TestName
-                Result = "FAIL"
-                EvidenceClass = "MEASURED"
-                Reason = $thermalAbort
-                Started = $stageStart.ToString("o")
-                Finished = (Get-Date).ToString("o")
-                MaxCpuC = $maxCpuC
-                MaxGpuC = $maxGpuC
-                MaxSsdC = $maxSsdC
-                MaxCpuLoadPercent = $maxCpuLoad
-                MaxGpuLoadPercent = $maxGpuLoad
-                MaxRamUsedPercent = $maxRamUsed
-                QualifiedLoadSamples = $qualifiedLoadSamples
-            }
-        }
-
-        Start-Sleep -Seconds $SampleSeconds
-    }
-
-    if ($exitEarly) {
-        return [pscustomobject]@{
-            Name = $TestName
-            Result = "INCOMPLETE"
-            EvidenceClass = "MEASURED"
-            Reason = "OCCT exited before the requested monitoring interval completed."
-            Started = $stageStart.ToString("o")
-            Finished = (Get-Date).ToString("o")
-            MaxCpuC = $maxCpuC
-            MaxGpuC = $maxGpuC
-            MaxSsdC = $maxSsdC
-            MaxCpuLoadPercent = $maxCpuLoad
-            MaxGpuLoadPercent = $maxGpuLoad
-            MaxRamUsedPercent = $maxRamUsed
-            QualifiedLoadSamples = $qualifiedLoadSamples
-        }
-    }
-
-    $loadSufficient = $false
-    if ($TestName -eq "CPU/RAM") {
-        $ramIncrease = $maxRamUsed - $baselineRamUsed
-        $loadSufficient = ($qualifiedLoadSamples -ge $requiredQualifiedSamples) -and ($ramIncrease -ge 5)
-    } else {
-        $ramIncrease = $null
-        $loadSufficient = $qualifiedLoadSamples -ge $requiredQualifiedSamples
-    }
-
-    if (-not $loadSufficient) {
-        Stop-GuidedTool -Process $proc
-        return [pscustomobject]@{
-            Name = $TestName
-            Result = "INCOMPLETE"
-            Reason = if ($TestName -eq "CPU/RAM") {
-                "The interval did not show sustained CPU load plus a meaningful RAM-use increase, so DadLAN cannot prove that the intended CPU + RAM test ran."
-            } else {
-                "The interval did not show sustained GPU load, so DadLAN cannot prove that the intended GPU test ran."
-            }
-            Started = $stageStart.ToString("o")
-            Finished = (Get-Date).ToString("o")
-            MaxCpuC = $maxCpuC
-            MaxGpuC = $maxGpuC
-            MaxSsdC = $maxSsdC
-            MaxCpuLoadPercent = $maxCpuLoad
-            MaxGpuLoadPercent = $maxGpuLoad
-            MaxRamUsedPercent = $maxRamUsed
-            BaselineRamUsedPercent = $baselineRamUsed
-            RamUsedIncreasePercent = $ramIncrease
-            QualifiedLoadSamples = $qualifiedLoadSamples
-            RequiredQualifiedSamples = $requiredQualifiedSamples
-        }
-    }
-
-    $finalOcctUi = Get-OcctUiTelemetry
-    Add-OcctUiTelemetry -Stage "$TestName-Final" -OcctUi $finalOcctUi
-    Write-Host "Monitoring interval complete. OCCT is still open so you can read its error counter."
-    if ($finalOcctUi -and $finalOcctUi.NoErrorsDetectedText) {
-        Write-Host "OCCT UI currently contains 'No errors detected'. This is supporting evidence only; operator confirmation is still required for PASS."
-    }
-    $errorResult = Ask-OcctErrorResult
-    Stop-GuidedTool -Process $proc
-
-    $result = "WARN"
-    $reason = "The test interval completed, but OCCT error status was not confirmed."
-
-    if ($errorResult -eq "ZeroErrorsConfirmed") {
-        $result = "PASS"
-        $reason = "The monitored interval completed and the operator confirmed OCCT reported zero errors."
-    } elseif ($errorResult -eq "ErrorsReported") {
-        $result = "FAIL"
-        $reason = "The operator reported OCCT errors."
-    }
-
-    [pscustomobject]@{
-        Name = $TestName
-        Result = $result
-        EvidenceClass = "MEASURED"
-        Reason = $reason
-        Started = $stageStart.ToString("o")
-        Finished = (Get-Date).ToString("o")
-        RequestedMinutes = $Minutes
-        MaxCpuC = $maxCpuC
-        MaxGpuC = $maxGpuC
-        MaxSsdC = $maxSsdC
-        MaxCpuLoadPercent = $maxCpuLoad
-        MaxGpuLoadPercent = $maxGpuLoad
-        MaxRamUsedPercent = $maxRamUsed
-        BaselineRamUsedPercent = $baselineRamUsed
-        RamUsedIncreasePercent = $ramIncrease
-        QualifiedLoadSamples = $qualifiedLoadSamples
-        RequiredQualifiedSamples = $requiredQualifiedSamples
-        CpuTemperatureSource = $pre.Temperatures.CpuSource
-        CpuTemperatureTrust = $pre.Temperatures.CpuTrust
-        OcctErrorConfirmation = $errorResult
-        OcctUiFinal = $finalOcctUi
-        OcctSafety = $occtSafety
-        OCCTPath = $occt
-    }
-}
-
-function Invoke-Cooldown {
-    $start = Get-Date
-    $deadline = $start.AddMinutes($CooldownMinutes)
-    $last = $null
-    $cooled = $false
-
-    Add-DadLANEvent "Cooldown" "Info" "Waiting for temperatures to return near baseline before the next load stage."
-
-    while ((Get-Date) -lt $deadline) {
-        $last = Add-DadLANTelemetrySample -Stage "Cooldown"
-
-        $cpuReady = $true
-        $gpuReady = $true
-
-        if ($null -ne $script:BaselineTemps.CpuC) {
-            $cpuReady = ($null -ne $last.Temperatures.CpuC) -and
-                ($last.Temperatures.CpuC -le ([double]$script:BaselineTemps.CpuC + 7))
-        }
-
-        if ($null -ne $script:BaselineTemps.GpuC) {
-            $gpuReady = ($null -ne $last.Temperatures.GpuC) -and
-                ($last.Temperatures.GpuC -le ([double]$script:BaselineTemps.GpuC + 7))
-        }
-
-        if ($cpuReady -and $gpuReady) {
-            $cooled = $true
-            break
-        }
-
-        Start-Sleep -Seconds 5
-    }
-
-    [pscustomobject]@{
-        Name = "Cooldown"
-        Result = if ($cooled) { "PASS" } else { "INCOMPLETE" }
-        Reason = if ($cooled) {
-            "Temperatures returned within 7 C of baseline."
-        } else {
-            "Cooldown timed out before temperatures returned within 7 C of baseline; the next load stage must not start."
-        }
-        ReadyForNextLoad = $cooled
-        FinalTemperatures = if ($last) { $last.Temperatures } else { $null }
-    }
-}
 
 function Invoke-StorageHealth {
     $rows = @()
@@ -1175,6 +543,8 @@ function Get-OverallResult {
     return "PASS"
 }
 
+. (Join-Path $PSScriptRoot 'DadLAN-HardwareSafety.ps1')
+
 try {
     Add-DadLANEvent "Start" "Info" "DadLAN Hardware Validation $script:Version started." @{
         Mode = $Mode
@@ -1183,38 +553,14 @@ try {
     }
 
     $script:Inventory = Get-DadLANInventory
+    $script:ImportedEvidence = @(Import-DadLANEvidence)
     Initialize-DadLANSensors
-    $script:OcctConfigPath = Find-OcctConfig -OcctPath (Find-Occt)
 
     $stages = @()
     $baseline = Invoke-Baseline
     $stages += $baseline
 
-    if ($Mode -in @("CpuRamGuide", "GuidedFull")) {
-        $stages += Invoke-GuidedOcctStage -TestName "CPU/RAM" -Minutes $CpuRamMinutes
-    }
-
-    $cooldown = $null
-    if ($Mode -eq "GuidedFull") {
-        $cooldown = Invoke-Cooldown
-        $stages += $cooldown
-    }
-
-    if ($Mode -eq "GpuGuide") {
-        $stages += Invoke-GuidedOcctStage -TestName "GPU" -Minutes $GpuMinutes
-    } elseif ($Mode -eq "GuidedFull") {
-        if ($cooldown -and $cooldown.Result -eq "PASS" -and $cooldown.ReadyForNextLoad) {
-            $stages += Invoke-GuidedOcctStage -TestName "GPU" -Minutes $GpuMinutes
-        } else {
-            $reason = "GPU stage skipped because cooldown readiness was not established."
-            Add-DadLANEvent "GPU" "Warning" $reason
-            $stages += [pscustomobject]@{
-                Name = "GPU"
-                Result = "INCOMPLETE"
-                Reason = $reason
-            }
-        }
-    }
+    $stages += @(Invoke-RequestedLoadStages)
 
     $stages += Invoke-StorageHealth
 
@@ -1231,10 +577,10 @@ try {
         DurationSeconds = [math]::Round(($finished - $script:Started).TotalSeconds, 1)
         OverallResult = $overall
         EvidenceModel = [pscustomobject]@{
-            CONFIRMED = "Direct identity evidence or explicit displayed result."
-            MEASURED = "Software or sensor observation; limitations remain attached."
-            INFERRED = "Plausible interpretation that is not independently established."
-            UNKNOWN = "Insufficient evidence; do not promote to PASS."
+            CONFIRMED = 'Direct identity evidence or explicit displayed result.'
+            MEASURED = 'Software or sensor observation; limitations remain attached.'
+            INFERRED = 'Plausible interpretation that is not independently established.'
+            UNKNOWN = 'Insufficient evidence; do not promote to PASS.'
         }
         Safety = [pscustomobject]@{
             CpuAbortC = $CpuAbortC
@@ -1244,11 +590,14 @@ try {
             CombinedCpuGpuStressAllowed = $false
             BiosOrClockChanges = $false
             LoadGenerator = "Operator-started OCCT only"
-            OcctConfigPath = $script:OcctConfigPath
+            OcctConfigPath = $OcctConfigPath
             OcctConfigIsReadOnly = $true
         }
         SensorProvider = $script:SensorProvider
         Inventory = $script:Inventory
+        InventoryEvidenceStatus = 'MEASURED'
+        ImportedFacts = $script:ImportedEvidence
+        Readiness = 'Not certified: results apply only to recorded observations and bounded intervals.'
         Stages = $stages
         Evidence = [pscustomobject]@{
             ReportJson = $script:ReportFile
@@ -1315,14 +664,6 @@ try {
     Write-Output "DADLAN_VALIDATION_END"
     exit 1
 } finally {
-    if ($script:ActiveGuidedProcess) {
-        try {
-            Add-DadLANEvent "Safety" "Warning" "Stopping active guided load generator during final cleanup."
-        } catch {
-        }
-        Stop-GuidedTool -Process $script:ActiveGuidedProcess
-    }
-
     if ($script:LhmComputer) {
         try { $script:LhmComputer.Close() } catch {}
     }
