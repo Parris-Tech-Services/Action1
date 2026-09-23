@@ -68,6 +68,7 @@ $requiredSafetyPatterns = [ordered]@{
     "cooldown requires current CPU telemetry when baseline exists" = '($null -ne $last.Temperatures.CpuC) -and'
     "cooldown requires current GPU telemetry when baseline exists" = '($null -ne $last.Temperatures.GpuC) -and'
     "GPU skipped after failed cooldown" = 'GPU stage skipped because cooldown readiness was not established.'
+    "portable LibreHardwareMonitor discovery" = 'Get-Process -Name "LibreHardwareMonitor"'
     "OCCT configuration discovery" = 'function Find-OcctConfig'
     "OCCT safety preflight" = 'function Get-OcctSafetyStatus'
     "OCCT stop-on-error requirement" = 'StopOnError=true'
