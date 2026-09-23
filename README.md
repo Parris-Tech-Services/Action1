@@ -9,7 +9,7 @@ Two front ends are included:
 
 ## Current status
 
-Version: **v0.4.0-dev — Hardware Validation**
+Version: **v0.4.1-dev — Hardware Validation**
 
 Implemented:
 
