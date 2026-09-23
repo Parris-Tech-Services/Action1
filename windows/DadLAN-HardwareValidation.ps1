@@ -491,7 +491,7 @@ function Stop-GuidedTool {
 }
 
 function Ask-OcctErrorResult {
-    $answer = Read-Host "Did OCCT finish/show this interval with ZERO errors? Type Y, N, or U for unknown"
+    $answer = Read-Host "Does OCCT currently show ZERO errors for this monitored interval? Type Y, N, or U for unknown"
     if ($answer -match "^(?i)y") { return "ZeroErrorsConfirmed" }
     if ($answer -match "^(?i)n") { return "ErrorsReported" }
     return "Unknown"
@@ -580,71 +580,72 @@ function Invoke-GuidedOcctStage {
     Read-Host "$instruction Once the test is visibly running, press Enter here"
 
     $deadline = (Get-Date).AddMinutes($Minutes)
-    $abortReason = $null
     $maxCpuC = $pre.Temperatures.CpuC
     $maxGpuC = $pre.Temperatures.GpuC
     $maxSsdC = $pre.Temperatures.SsdC
     $maxCpuLoad = 0
     $maxGpuLoad = 0
-    $maxRamUsed = 0
+    $maxRamUsed = if ($null -ne $pre.Usage.RamUsedPercent) { [double]$pre.Usage.RamUsedPercent } else { 0 }
+    $baselineRamUsed = $maxRamUsed
+    $qualifiedLoadSamples = 0
+    $requiredQualifiedSamples = [math]::Max(3, [math]::Ceiling(10.0 / $SampleSeconds))
+    $exitEarly = $false
 
-    try {
-        while ((Get-Date) -lt $deadline) {
-            if ($proc.HasExited) {
-                $abortReason = "OCCT exited before the requested monitoring interval completed."
-                break
-            }
-
-            $sample = Add-DadLANTelemetrySample -Stage $TestName
-
-            if ($null -ne $sample.Temperatures.CpuC) { $maxCpuC = [math]::Max([double]$maxCpuC, [double]$sample.Temperatures.CpuC) }
-            if ($null -ne $sample.Temperatures.GpuC) { $maxGpuC = [math]::Max([double]$maxGpuC, [double]$sample.Temperatures.GpuC) }
-            if ($null -ne $sample.Temperatures.SsdC) { $maxSsdC = [math]::Max([double]$maxSsdC, [double]$sample.Temperatures.SsdC) }
-            if ($null -ne $sample.Usage.CpuLoadPercent) { $maxCpuLoad = [math]::Max($maxCpuLoad, [double]$sample.Usage.CpuLoadPercent) }
-            if ($null -ne $sample.Usage.RamUsedPercent) { $maxRamUsed = [math]::Max($maxRamUsed, [double]$sample.Usage.RamUsedPercent) }
-
-            $gpuLoad = Get-DadLANGpuLoad -Sensors $sample.Sensors
-            if ($null -ne $gpuLoad) { $maxGpuLoad = [math]::Max($maxGpuLoad, $gpuLoad) }
-
-            $abortReason = Test-ThermalAbort -Sample $sample
-            if ($abortReason) {
-                Add-DadLANEvent $TestName "Error" $abortReason
-                break
-            }
-
-            Start-Sleep -Seconds $SampleSeconds
+    while ((Get-Date) -lt $deadline) {
+        if ($proc.HasExited) {
+            $exitEarly = $true
+            break
         }
-    } finally {
-        Stop-GuidedTool -Process $proc
-    }
 
-    if ($abortReason) {
-        return [pscustomobject]@{
-            Name = $TestName
-            Result = "FAIL"
-            Reason = $abortReason
-            Started = $stageStart.ToString("o")
-            Finished = (Get-Date).ToString("o")
-            MaxCpuC = $maxCpuC
-            MaxGpuC = $maxGpuC
-            MaxSsdC = $maxSsdC
-            MaxCpuLoadPercent = $maxCpuLoad
-            MaxGpuLoadPercent = $maxGpuLoad
-            MaxRamUsedPercent = $maxRamUsed
+        $sample = Add-DadLANTelemetrySample -Stage $TestName
+
+        if ($null -ne $sample.Temperatures.CpuC) { $maxCpuC = [math]::Max([double]$maxCpuC, [double]$sample.Temperatures.CpuC) }
+        if ($null -ne $sample.Temperatures.GpuC) { $maxGpuC = [math]::Max([double]$maxGpuC, [double]$sample.Temperatures.GpuC) }
+        if ($null -ne $sample.Temperatures.SsdC) { $maxSsdC = [math]::Max([double]$maxSsdC, [double]$sample.Temperatures.SsdC) }
+        if ($null -ne $sample.Usage.CpuLoadPercent) { $maxCpuLoad = [math]::Max($maxCpuLoad, [double]$sample.Usage.CpuLoadPercent) }
+        if ($null -ne $sample.Usage.RamUsedPercent) { $maxRamUsed = [math]::Max($maxRamUsed, [double]$sample.Usage.RamUsedPercent) }
+
+        $gpuLoad = Get-DadLANGpuLoad -Sensors $sample.Sensors
+        if ($null -ne $gpuLoad) {
+            $maxGpuLoad = [math]::Max($maxGpuLoad, $gpuLoad)
         }
+
+        if ($TestName -eq "CPU/RAM") {
+            if ($null -ne $sample.Usage.CpuLoadPercent -and $sample.Usage.CpuLoadPercent -ge 70) {
+                $qualifiedLoadSamples++
+            }
+        } elseif ($null -ne $gpuLoad -and $gpuLoad -ge 50) {
+            $qualifiedLoadSamples++
+        }
+
+        $thermalAbort = Test-ThermalAbort -Sample $sample
+        if ($thermalAbort) {
+            Add-DadLANEvent $TestName "Error" $thermalAbort
+            Stop-GuidedTool -Process $proc
+            return [pscustomobject]@{
+                Name = $TestName
+                Result = "FAIL"
+                Reason = $thermalAbort
+                Started = $stageStart.ToString("o")
+                Finished = (Get-Date).ToString("o")
+                MaxCpuC = $maxCpuC
+                MaxGpuC = $maxGpuC
+                MaxSsdC = $maxSsdC
+                MaxCpuLoadPercent = $maxCpuLoad
+                MaxGpuLoadPercent = $maxGpuLoad
+                MaxRamUsedPercent = $maxRamUsed
+                QualifiedLoadSamples = $qualifiedLoadSamples
+            }
+        }
+
+        Start-Sleep -Seconds $SampleSeconds
     }
 
-    $loadSufficient = if ($TestName -eq "CPU/RAM") {
-        $maxCpuLoad -ge 70
-    } else {
-        $maxGpuLoad -ge 50
-    }
-
-    if (-not $loadSufficient) {
+    if ($exitEarly) {
         return [pscustomobject]@{
             Name = $TestName
             Result = "INCOMPLETE"
-            Reason = "The monitoring interval completed, but the measured load was too low to prove the intended OCCT test actually ran."
+            Reason = "OCCT exited before the requested monitoring interval completed."
             Started = $stageStart.ToString("o")
             Finished = (Get-Date).ToString("o")
             MaxCpuC = $maxCpuC
@@ -653,10 +654,48 @@ function Invoke-GuidedOcctStage {
             MaxCpuLoadPercent = $maxCpuLoad
             MaxGpuLoadPercent = $maxGpuLoad
             MaxRamUsedPercent = $maxRamUsed
+            QualifiedLoadSamples = $qualifiedLoadSamples
         }
     }
 
+    $loadSufficient = $false
+    if ($TestName -eq "CPU/RAM") {
+        $ramIncrease = $maxRamUsed - $baselineRamUsed
+        $loadSufficient = ($qualifiedLoadSamples -ge $requiredQualifiedSamples) -and ($ramIncrease -ge 5)
+    } else {
+        $ramIncrease = $null
+        $loadSufficient = $qualifiedLoadSamples -ge $requiredQualifiedSamples
+    }
+
+    if (-not $loadSufficient) {
+        Stop-GuidedTool -Process $proc
+        return [pscustomobject]@{
+            Name = $TestName
+            Result = "INCOMPLETE"
+            Reason = if ($TestName -eq "CPU/RAM") {
+                "The interval did not show sustained CPU load plus a meaningful RAM-use increase, so DadLAN cannot prove that the intended CPU + RAM test ran."
+            } else {
+                "The interval did not show sustained GPU load, so DadLAN cannot prove that the intended GPU test ran."
+            }
+            Started = $stageStart.ToString("o")
+            Finished = (Get-Date).ToString("o")
+            MaxCpuC = $maxCpuC
+            MaxGpuC = $maxGpuC
+            MaxSsdC = $maxSsdC
+            MaxCpuLoadPercent = $maxCpuLoad
+            MaxGpuLoadPercent = $maxGpuLoad
+            MaxRamUsedPercent = $maxRamUsed
+            BaselineRamUsedPercent = $baselineRamUsed
+            RamUsedIncreasePercent = $ramIncrease
+            QualifiedLoadSamples = $qualifiedLoadSamples
+            RequiredQualifiedSamples = $requiredQualifiedSamples
+        }
+    }
+
+    Write-Host "Monitoring interval complete. OCCT is still open so you can read its error counter."
     $errorResult = Ask-OcctErrorResult
+    Stop-GuidedTool -Process $proc
+
     $result = "WARN"
     $reason = "The test interval completed, but OCCT error status was not confirmed."
 
@@ -681,6 +720,10 @@ function Invoke-GuidedOcctStage {
         MaxCpuLoadPercent = $maxCpuLoad
         MaxGpuLoadPercent = $maxGpuLoad
         MaxRamUsedPercent = $maxRamUsed
+        BaselineRamUsedPercent = $baselineRamUsed
+        RamUsedIncreasePercent = $ramIncrease
+        QualifiedLoadSamples = $qualifiedLoadSamples
+        RequiredQualifiedSamples = $requiredQualifiedSamples
         CpuTemperatureSource = $pre.Temperatures.CpuSource
         CpuTemperatureTrust = $pre.Temperatures.CpuTrust
         OcctErrorConfirmation = $errorResult
