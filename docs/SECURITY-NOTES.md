@@ -43,3 +43,13 @@ v0.4-dev adds hardware validation without adding an unrestricted remote shell.
 - The runner may close the OCCT process at the end of a bounded interval or after a thermal abort; it does not terminate unrelated processes.
 - BIOS/UEFI settings, XMP, clocks, voltages, GPU power limits, firmware and drivers are not modified.
 - `INCOMPLETE` must never be promoted to `PASS` merely because no crash occurred.
+
+
+### OCCT preflight added in v0.4.1-dev
+
+- Guided OCCT stages now read the local OCCT configuration before starting load.
+- DadLAN requires OCCT stop-on-error and stop-on-WHEA to be enabled and its temperature stop to be enabled at or below the DadLAN stage limit. If that cannot be verified, the stage is `INCOMPLETE` and no load is started.
+- The OCCT configuration is read-only. DadLAN does not silently enable, disable or rewrite OCCT settings.
+- When available, DadLAN records OCCT UI `CPU (Tctl)` and `CPU Package (TSI)` readings alongside LibreHardwareMonitor data. It uses the conservative maximum of available CPU/socket/Tctl/TSI readings for its own guard, while retaining the source limitations in the report.
+- If critical temperature telemetry disappears during a guided stage, DadLAN stops the active guided load and marks the stage `INCOMPLETE` rather than assuming the machine is safe.
+- `AllowOcbaseUpload=true` is surfaced as a privacy warning but is not modified automatically.
