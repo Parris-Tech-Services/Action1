@@ -57,8 +57,31 @@ foreach ($name in $requiredDiagnostics) {
     }
 }
 
+$runnerText = Get-Content -Path $runner -Raw
+
+$requiredSafetyPatterns = [ordered]@{
+    "tracked guided process" = '$script:ActiveGuidedProcess'
+    "fatal cleanup stops active load" = 'Stop-GuidedTool -Process $script:ActiveGuidedProcess'
+    "CPU telemetry loss abort" = 'Required CPU temperature telemetry disappeared'
+    "GPU telemetry loss abort" = 'Required GPU temperature telemetry disappeared'
+    "cooldown readiness gate" = 'ReadyForNextLoad = $cooled'
+    "GPU skipped after failed cooldown" = 'GPU stage skipped because cooldown readiness was not established.'
+}
+
+foreach ($check in $requiredSafetyPatterns.GetEnumerator()) {
+    if ($runnerText -notlike ("*" + $check.Value + "*")) {
+        throw "Missing hardware-validation safety guard: $($check.Key)"
+    }
+}
+
+if ($runnerText -match '\(\$_\.Manufacturer -as \[string\]\)\.Trim\(\)' -or
+    $runnerText -match '\(\$_\.PartNumber -as \[string\]\)\.Trim\(\)') {
+    throw "SMBIOS memory strings are not null-safe."
+}
+
 Write-Host "PASS: PowerShell parser accepted DadLAN-HardwareValidation.ps1"
 Write-Host "PASS: required diagnostic definitions are present"
+Write-Host "PASS: critical guided-load safety guards are present"
 
 if ($RunBaseline) {
     Write-Host "Running read-only baseline smoke test..."
