@@ -35,9 +35,27 @@ Suggested first diagnostics:
 - Python/Git presence
 - ForgeGrid worker/service presence
 
-## v0.4 — Fleet Operations
+## v0.4 — Hardware Validation
 
-Only after v0.3 is reliable:
+Goal: turn the existing Windows diagnostics, Fedora Crash Doctor testing patterns and the manual CPU-Z/GPU-Z/LibreHardwareMonitor/OCCT workflow into one bounded validation path.
+
+- [x] Windows hardware inventory baseline
+- [x] LibreHardwareMonitor WMI/library telemetry
+- [x] Windows storage-health / SMART prediction capture
+- [x] explicit CPU/GPU/SSD abort thresholds
+- [x] separate CPU/RAM and GPU stages
+- [x] cooldown stage between loads
+- [x] PASS / WARN / FAIL / INCOMPLETE result model
+- [x] timestamped JSON/CSV/TXT evidence
+- [x] Action1-safe read-only baseline diagnostic registration
+- [x] consumer OCCT kept operator-started rather than driven with undocumented CLI arguments
+- [ ] validate guided workflow on representative DadLAN machines
+- [ ] capture/parse OCCT native result files where a stable supported format is available
+- [ ] configure the real Action1 Hardware Validation package ID
+
+## v0.5 — Fleet Operations
+
+Only after v0.4 is validated:
 
 - [ ] multi-select jobs
 - [ ] bounded concurrency
@@ -49,7 +67,7 @@ Only after v0.3 is reliable:
 
 ## Later
 
-- richer hardware inventory
+- richer hardware inventory across more vendors
 - temperature/battery/SMART collection where available
 - update/vulnerability summaries
 - endpoint grouping

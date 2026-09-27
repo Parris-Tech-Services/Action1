@@ -1,35 +1,70 @@
 # DadLAN-Diagnostics.ps1
-# Contains predefined DadLAN diagnostics definitions.
+# Contains predefined DadLAN diagnostic definitions.
+#
+# Every Action1 job remains a named, bounded diagnostic. There is intentionally
+# no arbitrary PowerShell textbox or generic "run command" action.
 
-$script:DadLANDiagnostics = @{
-    "System Snapshot" = "REPLACE_WITH_SYSTEM_SNAPSHOT_PKG_ID"
+$script:DadLANDiagnostics = [ordered]@{
+    "System Snapshot" = [pscustomobject]@{
+        PackageId = "REPLACE_WITH_SYSTEM_SNAPSHOT_PKG_ID"
+        PollSeconds = 75
+        Description = "Read-only hostname, uptime, CPU/RAM, disk and tool-presence snapshot."
+        Interactive = $false
+    }
+
+    "Hardware Validation (Safe Baseline)" = [pscustomobject]@{
+        PackageId = "REPLACE_WITH_HARDWARE_VALIDATION_PKG_ID"
+        PollSeconds = 180
+        Description = "Read-only hardware inventory, LibreHardwareMonitor telemetry where available, and Windows storage-health checks. No stress test is started remotely."
+        Interactive = $false
+    }
 }
 
 function Get-DadLANDiagnosticList {
-    return $script:DadLANDiagnostics.Keys | Sort-Object
+    return $script:DadLANDiagnostics.Keys
 }
 
-function Get-DadLANDiagnosticPackageId {
+function Get-DadLANDiagnosticDefinition {
     param([string]$ActionName)
     return $script:DadLANDiagnostics[$ActionName]
 }
 
-# The actual diagnostic script payload to be manually uploaded to Action1 Software Repository:
-<#
-[CmdletBinding()]
-param()
-$results = @{
-    Hostname = $env:COMPUTERNAME
-    Uptime = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
-    CPU_Model = (Get-CimInstance Win32_Processor).Name
-    CPU_Usage = (Get-WmiObject Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average
-    RAM_TotalGB = [math]::Round((Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize / 1MB, 2)
-    RAM_FreeGB = [math]::Round((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1MB, 2)
-    Disk_FreeGB = [math]::Round(((Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'").FreeSpace) / 1GB, 2)
-    OS = (Get-CimInstance Win32_OperatingSystem).Caption
-    PythonStatus = if (Get-Command python -ErrorAction SilentlyContinue) { (python --version 2>&1) -join '' } else { "Not Installed" }
-    GitStatus = if (Get-Command git -ErrorAction SilentlyContinue) { (git --version 2>&1) -join '' } else { "Not Installed" }
-    ForgeGridStatus = if (Get-Service -Name "ForgeGrid*" -ErrorAction SilentlyContinue) { "Service Found" } elseif (Test-Path "C:\dev\GithubActions\ForgeGrid") { "Directory Found" } else { "Not Installed" }
+function Get-DadLANDiagnosticPackageId {
+    param([string]$ActionName)
+    $definition = Get-DadLANDiagnosticDefinition -ActionName $ActionName
+    if ($definition) { return $definition.PackageId }
+    return $null
 }
-$results | ConvertTo-Json
-#>
+
+function Get-DadLANDiagnosticPollSeconds {
+    param([string]$ActionName)
+    $definition = Get-DadLANDiagnosticDefinition -ActionName $ActionName
+    if ($definition -and $definition.PollSeconds) { return [int]$definition.PollSeconds }
+    return 75
+}
+
+function Get-DadLANDiagnosticDescription {
+    param([string]$ActionName)
+    $definition = Get-DadLANDiagnosticDefinition -ActionName $ActionName
+    if ($definition -and $definition.Description) { return [string]$definition.Description }
+    return ""
+}
+
+# Package payload guidance
+# ------------------------
+# System Snapshot:
+# Keep the existing read-only snapshot package.
+#
+# Hardware Validation (Safe Baseline):
+# Upload windows/DadLAN-HardwareValidation.ps1 to the Action1 Software Repository
+# and configure the package to invoke it with its default parameters. The default
+# mode is Baseline, so an Action1 deployment will NOT start OCCT or any load test.
+#
+# Full guided validation is intentionally local/interactive:
+#
+#   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\DadLAN-HardwareValidation.ps1 -Mode GuidedFull -Interactive
+#
+# On older systems where only an explicitly accepted fallback CPU/socket sensor is
+# available, add -AllowFallbackTemperature. The script records that lower-confidence
+# sensor source in the report and uses a more conservative guard for the known
+# Crosshair V Formula-Z / FX-6300 profile.

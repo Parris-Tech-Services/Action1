@@ -9,7 +9,7 @@ Two front ends are included:
 
 ## Current status
 
-Version: **v0.3.0 — Safe Remote Diagnostics**
+Version: **v0.4.1-dev — Hardware Validation**
 
 Implemented:
 
@@ -24,6 +24,10 @@ Implemented:
 - endpoint details
 - Action1 REST API payload construction and execution
 - **System Snapshot** remote diagnostic execution
+- **Hardware Validation (Safe Baseline)** remote diagnostic definition
+- Windows hardware-validation runner with LibreHardwareMonitor telemetry and SMART/storage health
+- Guided local OCCT CPU/RAM → cooldown → GPU workflow with temperature abort guards
+- structured PASS/WARN/FAIL/INCOMPLETE reports and CSV/JSON evidence
 - SQLite job history
 - Local metadata persistence
 - Worker-only targeting for remote actions (Controllers explicitly blocked)
@@ -34,6 +38,7 @@ Not implemented yet:
 - reboot/shutdown
 - software deployment
 - multi-endpoint bulk write actions
+- unattended consumer-OCCT stress automation (guided Start click remains intentional)
 
 ## Security
 
@@ -143,6 +148,7 @@ Laptop #01 and protected endpoints are strictly blocked from receiving remote ex
 ```text
 windows/
   DadLAN-Control.ps1
+  DadLAN-HardwareValidation.ps1
   Setup-Action1Controller.ps1
 fedora/
   dadlan.py
@@ -154,16 +160,23 @@ fedora/
 config/
   DadLAN-Machines.example.json
 docs/
+  HARDWARE-VALIDATION.md
   ROADMAP.md
   SECURITY-NOTES.md
 ```
 
+## Hardware validation
+
+See [docs/HARDWARE-VALIDATION.md](docs/HARDWARE-VALIDATION.md).
+
+The Action1-safe default is a read-only baseline. Full CPU/RAM and GPU validation is deliberately local/interactive in v0.4-dev so consumer OCCT is never driven with guessed or undocumented command-line arguments.
+
 ## Next milestone
 
-v0.4 will focus on **fleet operations**:
+Finish real-machine validation of v0.4, then continue fleet operations:
 
-1. multi-select jobs
-2. bounded concurrency
-3. reboot with confirmation
-4. software install from approved packages
+1. validate the hardware runner on representative DadLAN machines
+2. add approved Action1 package IDs
+3. multi-select jobs with bounded concurrency
+4. reboot/software install only with explicit confirmation
 5. ForgeGrid deployment/update workflow
