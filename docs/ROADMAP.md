@@ -24,7 +24,7 @@ Goal: prove the full Action1 → endpoint → result loop without opening arbitr
 - [x] SQLite job history
 - [x] API rate-limit handling (via retry loop / polling intervals)
 - [x] timeout/cancel handling
-- [ ] expand from one worker to selected workers only after validation
+- [ ] **TASK-00714** expand from one worker to selected workers only after validation
 
 Suggested first diagnostics:
 
@@ -39,13 +39,13 @@ Suggested first diagnostics:
 
 Only after v0.3 is reliable:
 
-- [ ] multi-select jobs
-- [ ] bounded concurrency
-- [ ] reboot with confirmation
-- [ ] software install from approved packages
-- [ ] ForgeGrid deployment/update workflow
-- [ ] controller excluded from fleet-wide actions by default
-- [ ] audit/export of job history
+- [ ] **TASK-00715** multi-select jobs
+- [ ] **TASK-00716** bounded concurrency
+- [ ] **TASK-00717** reboot with confirmation
+- [ ] **TASK-00718** software install from approved packages
+- [ ] **TASK-00719** ForgeGrid deployment/update workflow
+- [ ] **TASK-00720** controller excluded from fleet-wide actions by default
+- [ ] **TASK-00721** audit/export of job history
 
 ## Later
 
