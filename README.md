@@ -167,3 +167,9 @@ v0.4 will focus on **fleet operations**:
 3. reboot with confirmation
 4. software install from approved packages
 5. ForgeGrid deployment/update workflow
+
+## Engineering standard
+
+Engineering principles: v5.1  
+Assurance tier: 3  
+Canonical repository: https://github.com/Parris-Tech-Services/Action1
