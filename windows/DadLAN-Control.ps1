@@ -1,12 +1,12 @@
 # DadLAN-Control.ps1
-# v0.3: Modular Diagnostic Framework
+# v0.4-dev: Hardware Validation
 
 [CmdletBinding()]
 param (
     [switch]$TestMode = $true
 )
 
-$script:AppVersion = "v0.3"
+$script:AppVersion = "v0.4-dev"
 
 # Load modules
 . (Join-Path $PSScriptRoot "DadLAN-Action1Api.ps1")
@@ -376,8 +376,10 @@ $dataGridView.Add_SelectionChanged({
 
 $btnRunDiag.Add_Click({
     if (-not $script:SelectedEndpointId) { return }
-    $diagName = $cmbDiag.SelectedItem
+    $diagName = [string]$cmbDiag.SelectedItem
     $pkgId = Get-DadLANDiagnosticPackageId $diagName
+    $pollSeconds = Get-DadLANDiagnosticPollSeconds $diagName
+    $diagDescription = Get-DadLANDiagnosticDescription $diagName
     
     $ep = $script:EndpointsCache | Where-Object id -eq $script:SelectedEndpointId
     $meta = Get-DadLANMetadata $ep
@@ -392,7 +394,11 @@ $btnRunDiag.Add_Click({
         return
     }
 
-    $res = [System.Windows.Forms.MessageBox]::Show($form, "Execute '$diagName' on $($ep.name)?", "Confirm", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
+    $confirmText = "Execute '$diagName' on $($ep.name)?"
+    if ($diagDescription) {
+        $confirmText += [Environment]::NewLine + [Environment]::NewLine + $diagDescription
+    }
+    $res = [System.Windows.Forms.MessageBox]::Show($form, $confirmText, "Confirm", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
     if ($res -ne [System.Windows.Forms.DialogResult]::Yes) { return }
 
     GUI-Log $ep.name "Diag: $diagName" "Running" "Submitting deployment to Action1 API..."
@@ -407,7 +413,8 @@ $btnRunDiag.Add_Click({
 
         $isComplete = $false
         $outputLog = ""
-        for ($i = 0; $i -lt 15; $i++) {
+        $pollIterations = [math]::Max(1, [math]::Ceiling($pollSeconds / 5.0))
+        for ($i = 0; $i -lt $pollIterations; $i++) {
             Start-Sleep -Seconds 5
             $status = Get-DadLANDiagnosticResult -InstanceId $apiResult.id
             if ($status -and $status.status -ne "PENDING" -and $status.status -ne "RUNNING") {
@@ -421,8 +428,8 @@ $btnRunDiag.Add_Click({
             GUI-Log $ep.name "Diag: $diagName" "Success" "Execution finished."
             $rtbDetails.AppendText("`n[RESULT]`n$outputLog`n")
         } else {
-            GUI-Log $ep.name "Diag: $diagName" "Warning" "Execution timed out or still pending."
-            $rtbDetails.AppendText("`n[TIMEOUT] The diagnostic is still running. Check Action1 console.`n")
+            GUI-Log $ep.name "Diag: $diagName" "Warning" "Execution still pending after the configured $pollSeconds-second polling window."
+            $rtbDetails.AppendText("`n[TIMEOUT] The diagnostic is still running after $pollSeconds seconds. Check Action1 console.`n")
         }
     } catch {
         GUI-Log $ep.name "Diag: $diagName" "Error" $_.Exception.Message
